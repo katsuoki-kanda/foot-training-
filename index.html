@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>マルチトレーニングカウンター Pro Max</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            font-family: 'Arial Black', sans-serif;
+        }
+
+        .container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        video { display: none; }
+
+        canvas {
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover; 
+            transform: scaleX(-1);
+        }
+
+        /* カウンター共通設定 */
+        .counter {
+            position: absolute;
+            font-weight: 900;
+            text-shadow: 0 0 20px rgba(0,0,0,0.9);
+            pointer-events: none;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .counter-label { font-size: 20px; color: #fff; margin-bottom: -10px; opacity: 0.8; }
+        
+        /* 巨大フォント設定 (スクワットと総数) */
+        .large-font { font-size: 140px; line-height: 1; }
+        
+        /* 総数（上部中央） */
+        #total-counter {
+            top: 2%;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #ffffff;
+            background: rgba(0,0,0,0.2);
+            padding: 5px 40px;
+            border-radius: 30px;
+        }
+
+        /* 左右足（中央左右） */
+        #left-leg-counter { top: 35%; left: 8%; color: #00ffcc; }
+        #right-leg-counter { top: 35%; right: 8%; color: #ffcc00; }
+        #left-leg-counter .counter-value, #right-leg-counter .counter-value { font-size: 90px; }
+
+        /* スクワット（下部中央） */
+        #squat-counter { bottom: 12%; left: 50%; transform: translateX(-50%); color: #ff0000; }
+
+        #status-label {
+            position: absolute;
+            bottom: 30px;
+            width: 80%;
+            text-align: center;
+            font-size: 18px;
+            background: rgba(255, 255, 255, 0.8);
+            color: #333;
+            padding: 10px;
+            border-radius: 30px;
+            z-index: 20;
+        }
+
+        #start-screen {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+        #start-button {
+            padding: 20px 50px;
+            font-size: 24px;
+            background: #ff0000;
+            color: white;
+            border: none;
+            border-radius: 50px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .guide { color: #ccc; margin-top: 20px; text-align: center; line-height: 1.6; font-size: 14px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div id="start-screen" onclick="startApp()">
+            <button id="start-button">トレーニング開始</button>
+            <div class="guide">
+                3秒保持で+1、その後1秒ごとに+1ボーナス！<br>
+                <b>【0.3秒キープでカウントリセット】</b><br>
+                左手：左足 / 右手：右足 / 両手：スクワット
+            </div>
+        </div>
+
+        <video id="input_video" playsinline></video>
+        <canvas id="output_canvas"></canvas>
+        
+        <div id="total-counter" class="counter">
+            <div class="counter-label">TOTAL</div>
+            <div id="val-total" class="counter-value large-font">0</div>
+        </div>
+
+        <div id="left-leg-counter" class="counter">
+            <div class="counter-label">LEFT</div>
+            <div id="val-left" class="counter-value">0</div>
+        </div>
+
+        <div id="right-leg-counter" class="counter">
+            <div class="counter-label">RIGHT</div>
+            <div id="val-right" class="counter-value">0</div>
+        </div>
+
+        <div id="squat-counter" class="counter">
+            <div class="counter-label">SQUAT</div>
+            <div id="val-squat" class="counter-value large-font">0</div>
+        </div>
+
+        <div id="status-label">カメラを起動しています...</div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        
+        const displays = {
+            squat: document.getElementById('val-squat'),
+            left: document.getElementById('val-left'),
+            right: document.getElementById('val-right'),
+            total: document.getElementById('val-total')
+        };
+        const statusLabel = document.getElementById('status-label');
+        const startScreen = document.getElementById('start-screen');
+
+        let counters = { squat: 0, left: 0, right: 0 };
+        let stages = { squat: 'up', left: 'up', right: 'up' };
+        
+        // 保持ボーナス管理
+        let holdStartTimes = { squat: null, left: null, right: null };
+        let lastBonusMilestones = { squat: 0, left: 0, right: 0 };
+
+        // リセット待機管理
+        let resetHoldTimers = { left: null, right: null, squat: null };
+        const RESET_WAIT_MS = 300; 
+
+        let appStarted = false;
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const synth = window.speechSynthesis;
+
+        function playBeep() {
+            if (!appStarted) return;
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + 0.15);
+        }
+
+        function speak(text) {
+            if (!appStarted) return;
+            synth.cancel();
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'ja-JP';
+            utterance.rate = 1.7;
+            synth.speak(utterance);
+        }
+
+        function updateUI(type) {
+            displays[type].innerText = counters[type];
+            const total = counters.squat + counters.left + counters.right;
+            displays.total.innerText = total;
+        }
+
+        function calculateAngle(a, b, c) {
+            const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+            let angle = Math.abs(radians * 180.0 / Math.PI);
+            if (angle > 180.0) angle = 360 - angle;
+            return angle;
+        }
+
+        function handleResets(lHandUp, rHandUp) {
+            const now = Date.now();
+            const check = (key, isUp) => {
+                if (isUp) {
+                    if (!resetHoldTimers[key]) resetHoldTimers[key] = now;
+                    if (now - resetHoldTimers[key] > RESET_WAIT_MS && counters[key] > 0) {
+                        counters[key] = 0;
+                        updateUI(key);
+                        speak("リセット");
+                        resetHoldTimers[key] = now + 5000; // 連続リセット防止
+                    }
+                } else {
+                    resetHoldTimers[key] = null;
+                }
+            };
+
+            if (lHandUp && rHandUp) {
+                check('squat', true);
+                resetHoldTimers.left = resetHoldTimers.right = null;
+            } else {
+                check('left', lHandUp);
+                check('right', rHandUp);
+                resetHoldTimers.squat = null;
+            }
+        }
+
+        function runBonusLogic(type) {
+            if (stages[type] === 'down' && holdStartTimes[type]) {
+                const elapsed = (Date.now() - holdStartTimes[type]) / 1000;
+                if (elapsed >= 3) {
+                    const milestone = Math.floor(elapsed - 3) + 1;
+                    if (milestone > lastBonusMilestones[type]) {
+                        counters[type]++;
+                        lastBonusMilestones[type] = milestone;
+                        updateUI(type);
+                        playBeep();
+                        speak(counters[type].toString());
+                    }
+                }
+            }
+        }
+
+        function onResults(results) {
+            canvasElement.width = results.image.width;
+            canvasElement.height = results.image.height;
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.poseLandmarks) {
+                drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#ffffff', lineWidth: 2});
+                drawLandmarks(canvasCtx, results.poseLandmarks, {color: '#ff0000', radius: 3});
+
+                const lm = results.poseLandmarks;
+                const nose = lm[0], lWrist = lm[15], rWrist = lm[16];
+                const lAnkle = lm[27], rAnkle = lm[28], lKnee = lm[25], rKnee = lm[26], lHip = lm[23], rHip = lm[24];
+
+                // リセット判定
+                handleResets(lWrist.y < nose.y, rWrist.y < nose.y);
+
+                if (lAnkle && rAnkle && lKnee && rKnee) {
+                    const lAngle = calculateAngle(lHip, lKnee, lAnkle);
+                    const rAngle = calculateAngle(rHip, rKnee, rAnkle);
+                    const ankleDiff = lAnkle.y - rAnkle.y; 
+                    const THRESH_DOWN = 145, THRESH_UP = 165, LIFT_GAP = 0.06;
+
+                    // --- 姿勢判定 ---
+                    const enterDown = (type) => {
+                        if (stages[type] === 'up') {
+                            stages[type] = 'down';
+                            holdStartTimes[type] = Date.now();
+                            lastBonusMilestones[type] = 0;
+                            playBeep();
+                        }
+                    };
+
+                    // A. スクワット (両足が地面)
+                    if (Math.abs(ankleDiff) < LIFT_GAP && lAngle < THRESH_DOWN && rAngle < THRESH_DOWN) {
+                        enterDown('squat');
+                    } 
+                    // B. 左片足上げ (左足首が浮いている)
+                    else if (ankleDiff < -LIFT_GAP && lAngle < THRESH_DOWN && rAngle > THRESH_UP) {
+                        enterDown('left');
+                    }
+                    // C. 右片足上げ (右足首が浮いている)
+                    else if (ankleDiff > LIFT_GAP && rAngle < THRESH_DOWN && lAngle > THRESH_UP) {
+                        enterDown('right');
+                    }
+
+                    // ボーナス計算
+                    runBonusLogic('squat');
+                    runBonusLogic('left');
+                    runBonusLogic('right');
+
+                    // --- カウント加算 (Up時) ---
+                    const processUp = (type, isUpPos) => {
+                        if (isUpPos && stages[type] === 'down') {
+                            stages[type] = 'up';
+                            holdStartTimes[type] = null;
+                            counters[type]++;
+                            updateUI(type);
+                            speak(counters[type].toString());
+                        }
+                    };
+
+                    processUp('squat', lAngle > THRESH_UP && rAngle > THRESH_UP);
+                    processUp('left', lAngle > THRESH_UP);
+                    processUp('right', rAngle > THRESH_UP);
+                }
+                statusLabel.innerText = "トレーニング中：しっかりキープ！";
+            }
+            canvasCtx.restore();
+        }
+
+        const pose = new Pose({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+        });
+
+        pose.setOptions({ modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        pose.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await pose.send({image: videoElement}); },
+            width: 1280, height: 720, facingMode: 'user'
+        });
+
+        function startApp() {
+            appStarted = true;
+            audioCtx.resume();
+            startScreen.style.display = 'none';
+            camera.start();
+            speak("スタート");
+        }
+    </script>
+</body>
+</html>
